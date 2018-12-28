@@ -104,6 +104,7 @@ endif
 
 
 ## PATHS ##
+
 # sort is used to remove potential duplicates
 DIRS := $(sort $(build_bindir) $(build_depsbindir) $(build_libdir) $(build_includedir) $(build_sysconfdir) $(build_datarootdir) $(build_staging) $(build_prefix)/manifest)
 
@@ -142,37 +143,37 @@ define BINFILE_INSTALL
 endef
 
 define staged-install
-stage-$(strip $1): $$(build_staging)/$2.tgz
+stage-$(strip $1): $$(build_staging)$$(MAYBE_HOST)/$2.tgz
 install-$(strip $1): $$(build_prefix)/manifest/$(strip $1)
 uninstall-$(strip $1):
 	-rm $$(build_prefix)/manifest/$(strip $1)
-	-cd $$(build_prefix) && rm -dv -- $$$$($(TAR) -tzf $$(build_staging)/$2.tgz --exclude './$$$$')
+	-cd $$(build_prefix) && rm -dv -- $$$$($(TAR) -tzf $$(build_staging)$$(MAYBE_HOST)/$2.tgz --exclude './$$$$')
 
-ifeq (exists, $$(shell [ -e $$(build_staging)/$2.tgz ] && echo exists ))
+ifeq (exists, $$(shell [ -e $$(build_staging)$$(MAYBE_HOST)/$2.tgz ] && echo exists ))
 # clean depends on uninstall only if the staged file exists
 distclean-$(strip $1) clean-$(strip $1): uninstall-$(strip $1)
 else
 # uninstall depends on staging only if the staged file doesn't exist
 # otherwise, uninstall doesn't actually want the file to be updated first
-uninstall-$(strip $1): | $$(build_staging)/$2.tgz
+uninstall-$(strip $1): | $$(build_staging)$$(MAYBE_HOST)/$2.tgz
 endif
 
 reinstall-$(strip $1):
 	+$$(MAKE) uninstall-$(strip $1)
-	-rm $$(build_staging)/$2.tgz
+	-rm $$(build_staging)$$(MAYBE_HOST)/$2.tgz
 	+$$(MAKE) stage-$(strip $1)
 	+$$(MAKE) install-$(strip $1)
 
-$$(build_staging)/$2.tgz: $$(BUILDDIR)/$2/build-compiled
-	rm -rf $$(build_staging)/$2
-	mkdir -p $$(build_staging)/$2$$(build_prefix)
-	$(call $3,$$(BUILDDIR)/$2,$$(build_staging)/$2,$4)
-	cd $$(build_staging)/$2$$(build_prefix) && tar -czf $$@.tmp .
-	rm -rf $$(build_staging)/$2
+$$(build_staging)$$(MAYBE_HOST)/$2.tgz: $$(BUILDDIR)$$(MAYBE_HOST)/$2/build-compiled
+	rm -rf $$(build_staging)$$(MAYBE_HOST)/$2
+	mkdir -p $$(build_staging)$$(MAYBE_HOST)/$2$$(build_prefix)
+	$(call $3,$$(BUILDDIR)$$(MAYBE_HOST)/$2,$$(build_staging)$$(MAYBE_HOST)/$2,$4)
+	cd $$(build_staging)$$(MAYBE_HOST)/$2$$(build_prefix) && tar -czf $$@.tmp .
+	rm -rf $$(build_staging)$$(MAYBE_HOST)/$2
 	mv $$@.tmp $$@
 
-$$(build_prefix)/manifest/$(strip $1): $$(build_staging)/$2.tgz | $(build_prefix)/manifest
-	mkdir -p $$(build_prefix)
+$$(build_prefix)/manifest/$(strip $1): $$(build_staging)$$(MAYBE_HOST)/$2.tgz
+	mkdir -p $$(build_prefix)/manifest
 	$(UNTAR) $$< -C $$(build_prefix)
 	$6
 	echo $2 > $$@
