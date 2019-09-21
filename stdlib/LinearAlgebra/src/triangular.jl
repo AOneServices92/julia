@@ -13,7 +13,7 @@ for t in (:LowerTriangular, :UnitLowerTriangular, :UpperTriangular,
             data::S
 
             function $t{T,S}(data) where {T,S<:AbstractMatrix{T}}
-                @assert !has_offset_axes(data)
+                require_one_based_indexing(data)
                 checksquare(data)
                 new{T,S}(data)
             end
@@ -97,6 +97,52 @@ julia> UpperTriangular(A)
 ```
 """
 UpperTriangular
+"""
+    UnitLowerTriangular(A::AbstractMatrix)
+
+Construct a `UnitLowerTriangular` view of the matrix `A`.
+Such a view has the [`oneunit`](@ref) of the [`eltype`](@ref)
+of `A` on its diagonal.
+
+# Examples
+```jldoctest
+julia> A = [1.0 2.0 3.0; 4.0 5.0 6.0; 7.0 8.0 9.0]
+3×3 Array{Float64,2}:
+ 1.0  2.0  3.0
+ 4.0  5.0  6.0
+ 7.0  8.0  9.0
+
+julia> UnitLowerTriangular(A)
+3×3 UnitLowerTriangular{Float64,Array{Float64,2}}:
+ 1.0   ⋅    ⋅
+ 4.0  1.0   ⋅
+ 7.0  8.0  1.0
+```
+"""
+UnitLowerTriangular
+"""
+    UnitUpperTriangular(A::AbstractMatrix)
+
+Construct an `UnitUpperTriangular` view of the matrix `A`.
+Such a view has the [`oneunit`](@ref) of the [`eltype`](@ref)
+of `A` on its diagonal.
+
+# Examples
+```jldoctest
+julia> A = [1.0 2.0 3.0; 4.0 5.0 6.0; 7.0 8.0 9.0]
+3×3 Array{Float64,2}:
+ 1.0  2.0  3.0
+ 4.0  5.0  6.0
+ 7.0  8.0  9.0
+
+julia> UnitUpperTriangular(A)
+3×3 UnitUpperTriangular{Float64,Array{Float64,2}}:
+ 1.0  2.0  3.0
+  ⋅   1.0  6.0
+  ⋅    ⋅   1.0
+```
+"""
+UnitUpperTriangular
 
 imag(A::UpperTriangular) = UpperTriangular(imag(A.data))
 imag(A::LowerTriangular) = LowerTriangular(imag(A.data))
@@ -346,14 +392,14 @@ Base.copy(A::Transpose{<:Any,<:UpperTriangular}) = transpose!(copy(A.parent))
 Base.copy(A::Transpose{<:Any,<:UnitLowerTriangular}) = transpose!(copy(A.parent))
 Base.copy(A::Transpose{<:Any,<:UnitUpperTriangular}) = transpose!(copy(A.parent))
 
-transpose!(A::LowerTriangular) = UpperTriangular(copytri!(A.data, 'L'))
-transpose!(A::UnitLowerTriangular) = UnitUpperTriangular(copytri!(A.data, 'L'))
-transpose!(A::UpperTriangular) = LowerTriangular(copytri!(A.data, 'U'))
-transpose!(A::UnitUpperTriangular) = UnitLowerTriangular(copytri!(A.data, 'U'))
-adjoint!(A::LowerTriangular) = UpperTriangular(copytri!(A.data, 'L' , true))
-adjoint!(A::UnitLowerTriangular) = UnitUpperTriangular(copytri!(A.data, 'L' , true))
-adjoint!(A::UpperTriangular) = LowerTriangular(copytri!(A.data, 'U' , true))
-adjoint!(A::UnitUpperTriangular) = UnitLowerTriangular(copytri!(A.data, 'U' , true))
+transpose!(A::LowerTriangular) = UpperTriangular(copytri!(A.data, 'L', false, true))
+transpose!(A::UnitLowerTriangular) = UnitUpperTriangular(copytri!(A.data, 'L', false, true))
+transpose!(A::UpperTriangular) = LowerTriangular(copytri!(A.data, 'U', false, true))
+transpose!(A::UnitUpperTriangular) = UnitLowerTriangular(copytri!(A.data, 'U', false, true))
+adjoint!(A::LowerTriangular) = UpperTriangular(copytri!(A.data, 'L' , true, true))
+adjoint!(A::UnitLowerTriangular) = UnitUpperTriangular(copytri!(A.data, 'L' , true, true))
+adjoint!(A::UpperTriangular) = LowerTriangular(copytri!(A.data, 'U' , true, true))
+adjoint!(A::UnitUpperTriangular) = UnitLowerTriangular(copytri!(A.data, 'U' , true, true))
 
 diag(A::LowerTriangular) = diag(A.data)
 diag(A::UnitLowerTriangular) = fill(one(eltype(A)), size(A,1))
@@ -398,78 +444,99 @@ function copyto!(A::T, B::T) where T<:Union{LowerTriangular,UnitLowerTriangular}
     return A
 end
 
-function mul!(A::UpperTriangular, B::UpperTriangular, c::Number)
+# Define `mul!` for (Unit){Upper,Lower}Triangular matrices times a
+# number.
+for (Trig, UnitTrig) in [(UpperTriangular, UnitUpperTriangular),
+                         (LowerTriangular, UnitLowerTriangular)]
+    for (TB, TC) in [(Trig, Number),
+                     (Number, Trig),
+                     (UnitTrig, Number),
+                     (Number, UnitTrig)]
+        @eval @inline mul!(A::$Trig, B::$TB, C::$TC, alpha::Number, beta::Number) =
+            _mul!(A, B, C, MulAddMul(alpha, beta))
+    end
+end
+
+@inline function _mul!(A::UpperTriangular, B::UpperTriangular, c::Number, _add::MulAddMul)
     n = checksquare(B)
+    iszero(_add.alpha) && return _rmul_or_fill!(C, _add.beta)
     for j = 1:n
         for i = 1:j
-            @inbounds A[i,j] = B[i,j] * c
+            @inbounds _modify!(_add, B[i,j] * c, A, (i,j))
         end
     end
     return A
 end
-function mul!(A::UpperTriangular, c::Number, B::UpperTriangular)
+@inline function _mul!(A::UpperTriangular, c::Number, B::UpperTriangular, _add::MulAddMul)
     n = checksquare(B)
+    iszero(_add.alpha) && return _rmul_or_fill!(C, _add.beta)
     for j = 1:n
         for i = 1:j
-            @inbounds A[i,j] = c * B[i,j]
+            @inbounds _modify!(_add, c * B[i,j], A, (i,j))
         end
     end
     return A
 end
-function mul!(A::UpperTriangular, B::UnitUpperTriangular, c::Number)
+@inline function _mul!(A::UpperTriangular, B::UnitUpperTriangular, c::Number, _add::MulAddMul)
     n = checksquare(B)
+    iszero(_add.alpha) && return _rmul_or_fill!(C, _add.beta)
     for j = 1:n
-        @inbounds A[j,j] = c
+        @inbounds _modify!(_add, c, A, (j,j))
         for i = 1:(j - 1)
-            @inbounds A[i,j] = B[i,j] * c
+            @inbounds _modify!(_add, B[i,j] * c, A, (i,j))
         end
     end
     return A
 end
-function mul!(A::UpperTriangular, c::Number, B::UnitUpperTriangular)
+@inline function _mul!(A::UpperTriangular, c::Number, B::UnitUpperTriangular, _add::MulAddMul)
     n = checksquare(B)
+    iszero(_add.alpha) && return _rmul_or_fill!(C, _add.beta)
     for j = 1:n
-        @inbounds A[j,j] = c
+        @inbounds _modify!(_add, c, A, (j,j))
         for i = 1:(j - 1)
-            @inbounds A[i,j] = c * B[i,j]
+            @inbounds _modify!(_add, c * B[i,j], A, (i,j))
         end
     end
     return A
 end
-function mul!(A::LowerTriangular, B::LowerTriangular, c::Number)
+@inline function _mul!(A::LowerTriangular, B::LowerTriangular, c::Number, _add::MulAddMul)
     n = checksquare(B)
+    iszero(_add.alpha) && return _rmul_or_fill!(C, _add.beta)
     for j = 1:n
         for i = j:n
-            @inbounds A[i,j] = B[i,j] * c
+            @inbounds _modify!(_add, B[i,j] * c, A, (i,j))
         end
     end
     return A
 end
-function mul!(A::LowerTriangular, c::Number, B::LowerTriangular)
+@inline function _mul!(A::LowerTriangular, c::Number, B::LowerTriangular, _add::MulAddMul)
     n = checksquare(B)
+    iszero(_add.alpha) && return _rmul_or_fill!(C, _add.beta)
     for j = 1:n
         for i = j:n
-            @inbounds A[i,j] = c * B[i,j]
+            @inbounds _modify!(_add, c * B[i,j], A, (i,j))
         end
     end
     return A
 end
-function mul!(A::LowerTriangular, B::UnitLowerTriangular, c::Number)
+@inline function _mul!(A::LowerTriangular, B::UnitLowerTriangular, c::Number, _add::MulAddMul)
     n = checksquare(B)
+    iszero(_add.alpha) && return _rmul_or_fill!(C, _add.beta)
     for j = 1:n
-            @inbounds A[j,j] = c
+        @inbounds _modify!(_add, c, A, (j,j))
         for i = (j + 1):n
-            @inbounds A[i,j] = B[i,j] * c
+            @inbounds _modify!(_add, B[i,j] * c, A, (i,j))
         end
     end
     return A
 end
-function mul!(A::LowerTriangular, c::Number, B::UnitLowerTriangular)
+@inline function _mul!(A::LowerTriangular, c::Number, B::UnitLowerTriangular, _add::MulAddMul)
     n = checksquare(B)
+    iszero(_add.alpha) && return _rmul_or_fill!(C, _add.beta)
     for j = 1:n
-            @inbounds A[j,j] = c
+        @inbounds _modify!(_add, c, A, (j,j))
         for i = (j + 1):n
-            @inbounds A[i,j] = c * B[i,j]
+            @inbounds _modify!(_add, c * B[i,j], A, (i,j))
         end
     end
     return A
@@ -477,6 +544,90 @@ end
 
 rmul!(A::Union{UpperTriangular,LowerTriangular}, c::Number) = mul!(A, A, c)
 lmul!(c::Number, A::Union{UpperTriangular,LowerTriangular}) = mul!(A, c, A)
+
+function dot(x::AbstractVector, A::UpperTriangular, y::AbstractVector)
+    require_one_based_indexing(x, y)
+    m = size(A, 1)
+    (length(x) == m == length(y)) || throw(DimensionMismatch())
+    if iszero(m)
+        return dot(zero(eltype(x)), zero(eltype(A)), zero(eltype(y)))
+    end
+    x₁ = x[1]
+    r = dot(x₁, A[1,1], y[1])
+    @inbounds for j in 2:m
+        yj = y[j]
+        if !iszero(yj)
+            temp = adjoint(A[1,j]) * x₁
+            @simd for i in 2:j
+                temp += adjoint(A[i,j]) * x[i]
+            end
+            r += dot(temp, yj)
+        end
+    end
+    return r
+end
+function dot(x::AbstractVector, A::UnitUpperTriangular, y::AbstractVector)
+    require_one_based_indexing(x, y)
+    m = size(A, 1)
+    (length(x) == m == length(y)) || throw(DimensionMismatch())
+    if iszero(m)
+        return dot(zero(eltype(x)), zero(eltype(A)), zero(eltype(y)))
+    end
+    x₁ = first(x)
+    r = dot(x₁, y[1])
+    @inbounds for j in 2:m
+        yj = y[j]
+        if !iszero(yj)
+            temp = adjoint(A[1,j]) * x₁
+            @simd for i in 2:j-1
+                temp += adjoint(A[i,j]) * x[i]
+            end
+            r += dot(temp, yj)
+            r += dot(x[j], yj)
+        end
+    end
+    return r
+end
+function dot(x::AbstractVector, A::LowerTriangular, y::AbstractVector)
+    require_one_based_indexing(x, y)
+    m = size(A, 1)
+    (length(x) == m == length(y)) || throw(DimensionMismatch())
+    if iszero(m)
+        return dot(zero(eltype(x)), zero(eltype(A)), zero(eltype(y)))
+    end
+    r = zero(typeof(dot(first(x), first(A), first(y))))
+    @inbounds for j in 1:m
+        yj = y[j]
+        if !iszero(yj)
+            temp = adjoint(A[j,j]) * x[j]
+            @simd for i in j+1:m
+                temp += adjoint(A[i,j]) * x[i]
+            end
+            r += dot(temp, yj)
+        end
+    end
+    return r
+end
+function dot(x::AbstractVector, A::UnitLowerTriangular, y::AbstractVector)
+    require_one_based_indexing(x, y)
+    m = size(A, 1)
+    (length(x) == m == length(y)) || throw(DimensionMismatch())
+    if iszero(m)
+        return dot(zero(eltype(x)), zero(eltype(A)), zero(eltype(y)))
+    end
+    r = zero(typeof(dot(first(x), first(y))))
+    @inbounds for j in 1:m
+        yj = y[j]
+        if !iszero(yj)
+            temp = x[j]
+            @simd for i in j+1:m
+                temp += adjoint(A[i,j]) * x[i]
+            end
+            r += dot(temp, yj)
+        end
+    end
+    return r
+end
 
 fillstored!(A::LowerTriangular, x)     = (fillband!(A.data, x, 1-size(A,1), 0); A)
 fillstored!(A::UnitLowerTriangular, x) = (fillband!(A.data, x, 1-size(A,1), -1); A)
@@ -510,8 +661,10 @@ fillstored!(A::UnitUpperTriangular, x) = (fillband!(A.data, x, 1, size(A,2)-1); 
 
 lmul!(A::Tridiagonal, B::AbstractTriangular) = A*full!(B) # is this necessary?
 
-mul!(C::AbstractMatrix, A::AbstractTriangular, B::Tridiagonal) = mul!(C, copyto!(similar(parent(A)), A), B)
-mul!(C::AbstractMatrix, A::Tridiagonal, B::AbstractTriangular) = mul!(C, A, copyto!(similar(parent(B)), B))
+@inline mul!(C::AbstractMatrix, A::AbstractTriangular, B::Tridiagonal, alpha::Number, beta::Number) =
+    mul!(C, copyto!(similar(parent(A)), A), B, alpha, beta)
+@inline mul!(C::AbstractMatrix, A::Tridiagonal, B::AbstractTriangular, alpha::Number, beta::Number) =
+    mul!(C, A, copyto!(similar(parent(B)), B), alpha, beta)
 mul!(C::AbstractVector, A::AbstractTriangular, transB::Transpose{<:Any,<:AbstractVecOrMat}) =
     (B = transB.parent; lmul!(A, transpose!(C, B)))
 mul!(C::AbstractMatrix, A::AbstractTriangular, transB::Transpose{<:Any,<:AbstractVecOrMat}) =
@@ -537,10 +690,14 @@ mul!(C::AbstractMatrix  , transA::Transpose{<:Any,<:AbstractTriangular}, B::Abst
     (A = transA.parent; lmul!(transpose(A), copyto!(C, B)))
 mul!(C::AbstractVecOrMat, transA::Transpose{<:Any,<:AbstractTriangular}, B::AbstractVecOrMat) =
     (A = transA.parent; lmul!(transpose(A), copyto!(C, B)))
-mul!(C::AbstractMatrix, A::Adjoint{<:Any,<:AbstractTriangular}, B::Adjoint{<:Any,<:AbstractVecOrMat}) = mul!(C, A, copy(B))
-mul!(C::AbstractMatrix, A::Adjoint{<:Any,<:AbstractTriangular}, B::Transpose{<:Any,<:AbstractVecOrMat}) = mul!(C, A, copy(B))
-mul!(C::AbstractMatrix, A::Transpose{<:Any,<:AbstractTriangular}, B::Adjoint{<:Any,<:AbstractVecOrMat}) = mul!(C, A, copy(B))
-mul!(C::AbstractMatrix, A::Transpose{<:Any,<:AbstractTriangular}, B::Transpose{<:Any,<:AbstractVecOrMat}) = mul!(C, A, copy(B))
+@inline mul!(C::AbstractMatrix, A::Adjoint{<:Any,<:AbstractTriangular}, B::Adjoint{<:Any,<:AbstractVecOrMat}, alpha::Number, beta::Number) =
+    mul!(C, A, copy(B), alpha, beta)
+@inline mul!(C::AbstractMatrix, A::Adjoint{<:Any,<:AbstractTriangular}, B::Transpose{<:Any,<:AbstractVecOrMat}, alpha::Number, beta::Number) =
+    mul!(C, A, copy(B), alpha, beta)
+@inline mul!(C::AbstractMatrix, A::Transpose{<:Any,<:AbstractTriangular}, B::Adjoint{<:Any,<:AbstractVecOrMat}, alpha::Number, beta::Number) =
+    mul!(C, A, copy(B), alpha, beta)
+@inline mul!(C::AbstractMatrix, A::Transpose{<:Any,<:AbstractTriangular}, B::Transpose{<:Any,<:AbstractVecOrMat}, alpha::Number, beta::Number) =
+    mul!(C, A, copy(B), alpha, beta)
 mul!(C::AbstractVector, A::Adjoint{<:Any,<:AbstractTriangular}, B::Transpose{<:Any,<:AbstractVecOrMat}) = throw(MethodError(mul!, (C, A, B)))
 mul!(C::AbstractVector, A::Transpose{<:Any,<:AbstractTriangular}, B::Transpose{<:Any,<:AbstractVecOrMat}) = throw(MethodError(mul!, (C, A, B)))
 
@@ -1138,7 +1295,7 @@ end
 # replacing repeated references to A.data[j,j] with [Ajj = A.data[j,j] and references to Ajj]
 # does not significantly impact performance as of Dec 2015
 function naivesub!(A::UpperTriangular, b::AbstractVector, x::AbstractVector = b)
-    @assert !has_offset_axes(A, b, x)
+    require_one_based_indexing(A, b, x)
     n = size(A, 2)
     if !(n == length(b) == length(x))
         throw(DimensionMismatch("second dimension of left hand side A, $n, length of output x, $(length(x)), and length of right hand side b, $(length(b)), must be equal"))
@@ -1153,7 +1310,7 @@ function naivesub!(A::UpperTriangular, b::AbstractVector, x::AbstractVector = b)
     x
 end
 function naivesub!(A::UnitUpperTriangular, b::AbstractVector, x::AbstractVector = b)
-    @assert !has_offset_axes(A, b, x)
+    require_one_based_indexing(A, b, x)
     n = size(A, 2)
     if !(n == length(b) == length(x))
         throw(DimensionMismatch("second dimension of left hand side A, $n, length of output x, $(length(x)), and length of right hand side b, $(length(b)), must be equal"))
@@ -1167,7 +1324,7 @@ function naivesub!(A::UnitUpperTriangular, b::AbstractVector, x::AbstractVector 
     x
 end
 function naivesub!(A::LowerTriangular, b::AbstractVector, x::AbstractVector = b)
-    @assert !has_offset_axes(A, b, x)
+    require_one_based_indexing(A, b, x)
     n = size(A, 2)
     if !(n == length(b) == length(x))
         throw(DimensionMismatch("second dimension of left hand side A, $n, length of output x, $(length(x)), and length of right hand side b, $(length(b)), must be equal"))
@@ -1182,7 +1339,7 @@ function naivesub!(A::LowerTriangular, b::AbstractVector, x::AbstractVector = b)
     x
 end
 function naivesub!(A::UnitLowerTriangular, b::AbstractVector, x::AbstractVector = b)
-    @assert !has_offset_axes(A, b, x)
+    require_one_based_indexing(A, b, x)
     n = size(A, 2)
     if !(n == length(b) == length(x))
         throw(DimensionMismatch("second dimension of left hand side A, $n, length of output x, $(length(x)), and length of right hand side b, $(length(b)), must be equal"))
@@ -1198,7 +1355,7 @@ end
 # in the following transpose and conjugate transpose naive substitution variants,
 # accumulating in z rather than b[j] significantly improves performance as of Dec 2015
 function ldiv!(transA::Transpose{<:Any,<:LowerTriangular}, b::AbstractVector, x::AbstractVector)
-    @assert !has_offset_axes(transA, b, x)
+    require_one_based_indexing(transA, b, x)
     A = transA.parent
     n = size(A, 1)
     if !(n == length(b) == length(x))
@@ -1217,7 +1374,7 @@ end
 ldiv!(transA::Transpose{<:Any,<:LowerTriangular}, b::AbstractVector) = ldiv!(transA, b, b)
 
 function ldiv!(transA::Transpose{<:Any,<:UnitLowerTriangular}, b::AbstractVector, x::AbstractVector)
-    @assert !has_offset_axes(transA, b, x)
+    require_one_based_indexing(transA, b, x)
     A = transA.parent
     n = size(A, 1)
     if !(n == length(b) == length(x))
@@ -1235,7 +1392,7 @@ end
 ldiv!(transA::Transpose{<:Any,<:UnitLowerTriangular}, b::AbstractVector) = ldiv!(transA, b, b)
 
 function ldiv!(transA::Transpose{<:Any,<:UpperTriangular}, b::AbstractVector, x::AbstractVector)
-    @assert !has_offset_axes(transA, b, x)
+    require_one_based_indexing(transA, b, x)
     A = transA.parent
     n = size(A, 1)
     if !(n == length(b) == length(x))
@@ -1254,7 +1411,7 @@ end
 ldiv!(transA::Transpose{<:Any,<:UpperTriangular}, b::AbstractVector) = ldiv!(transA, b, b)
 
 function ldiv!(transA::Transpose{<:Any,<:UnitUpperTriangular}, b::AbstractVector, x::AbstractVector)
-    @assert !has_offset_axes(transA, b, x)
+    require_one_based_indexing(transA, b, x)
     A = transA.parent
     n = size(A, 1)
     if !(n == length(b) == length(x))
@@ -1272,7 +1429,7 @@ end
 ldiv!(transA::Transpose{<:Any,<:UnitUpperTriangular}, b::AbstractVector) = ldiv!(transA, b, b)
 
 function ldiv!(adjA::Adjoint{<:Any,<:LowerTriangular}, b::AbstractVector, x::AbstractVector)
-    @assert !has_offset_axes(adjA, b, x)
+    require_one_based_indexing(adjA, b, x)
     A = adjA.parent
     n = size(A, 1)
     if !(n == length(b) == length(x))
@@ -1291,7 +1448,7 @@ end
 ldiv!(adjA::Adjoint{<:Any,<:LowerTriangular}, b::AbstractVector) = ldiv!(adjA, b, b)
 
 function ldiv!(adjA::Adjoint{<:Any,<:UnitLowerTriangular}, b::AbstractVector, x::AbstractVector)
-    @assert !has_offset_axes(adjA, b, x)
+    require_one_based_indexing(adjA, b, x)
     A = adjA.parent
     n = size(A, 1)
     if !(n == length(b) == length(x))
@@ -1309,7 +1466,7 @@ end
 ldiv!(adjA::Adjoint{<:Any,<:UnitLowerTriangular}, b::AbstractVector) = ldiv!(adjA, b, b)
 
 function ldiv!(adjA::Adjoint{<:Any,<:UpperTriangular}, b::AbstractVector, x::AbstractVector)
-    @assert !has_offset_axes(adjA, b, x)
+    require_one_based_indexing(adjA, b, x)
     A = adjA.parent
     n = size(A, 1)
     if !(n == length(b) == length(x))
@@ -1328,7 +1485,7 @@ end
 ldiv!(adjA::Adjoint{<:Any,<:UpperTriangular}, b::AbstractVector) = ldiv!(adjA, b, b)
 
 function ldiv!(adjA::Adjoint{<:Any,<:UnitUpperTriangular}, b::AbstractVector, x::AbstractVector)
-    @assert !has_offset_axes(adjA, b, x)
+    require_one_based_indexing(adjA, b, x)
     A = adjA.parent
     n = size(A, 1)
     if !(n == length(b) == length(x))
@@ -1794,14 +1951,14 @@ for mat in (:AbstractVector, :AbstractMatrix)
     ### Multiplication with triangle to the left and hence rhs cannot be transposed.
     @eval begin
         function *(A::AbstractTriangular, B::$mat)
-            @assert !has_offset_axes(B)
+            require_one_based_indexing(B)
             TAB = typeof(zero(eltype(A))*zero(eltype(B)) + zero(eltype(A))*zero(eltype(B)))
             BB = similar(B, TAB, size(B))
             copyto!(BB, B)
             lmul!(convert(AbstractArray{TAB}, A), BB)
         end
         function *(adjA::Adjoint{<:Any,<:AbstractTriangular}, B::$mat)
-            @assert !has_offset_axes(B)
+            require_one_based_indexing(B)
             A = adjA.parent
             TAB = typeof(zero(eltype(A))*zero(eltype(B)) + zero(eltype(A))*zero(eltype(B)))
             BB = similar(B, TAB, size(B))
@@ -1809,7 +1966,7 @@ for mat in (:AbstractVector, :AbstractMatrix)
             lmul!(adjoint(convert(AbstractArray{TAB}, A)), BB)
         end
         function *(transA::Transpose{<:Any,<:AbstractTriangular}, B::$mat)
-            @assert !has_offset_axes(B)
+            require_one_based_indexing(B)
             A = transA.parent
             TAB = typeof(zero(eltype(A))*zero(eltype(B)) + zero(eltype(A))*zero(eltype(B)))
             BB = similar(B, TAB, size(B))
@@ -1820,14 +1977,14 @@ for mat in (:AbstractVector, :AbstractMatrix)
     ### Left division with triangle to the left hence rhs cannot be transposed. No quotients.
     @eval begin
         function \(A::Union{UnitUpperTriangular,UnitLowerTriangular}, B::$mat)
-            @assert !has_offset_axes(B)
+            require_one_based_indexing(B)
             TAB = typeof(zero(eltype(A))*zero(eltype(B)) + zero(eltype(A))*zero(eltype(B)))
             BB = similar(B, TAB, size(B))
             copyto!(BB, B)
             ldiv!(convert(AbstractArray{TAB}, A), BB)
         end
         function \(adjA::Adjoint{<:Any,<:Union{UnitUpperTriangular,UnitLowerTriangular}}, B::$mat)
-            @assert !has_offset_axes(B)
+            require_one_based_indexing(B)
             A = adjA.parent
             TAB = typeof(zero(eltype(A))*zero(eltype(B)) + zero(eltype(A))*zero(eltype(B)))
             BB = similar(B, TAB, size(B))
@@ -1835,7 +1992,7 @@ for mat in (:AbstractVector, :AbstractMatrix)
             ldiv!(adjoint(convert(AbstractArray{TAB}, A)), BB)
         end
         function \(transA::Transpose{<:Any,<:Union{UnitUpperTriangular,UnitLowerTriangular}}, B::$mat)
-            @assert !has_offset_axes(B)
+            require_one_based_indexing(B)
             A = transA.parent
             TAB = typeof(zero(eltype(A))*zero(eltype(B)) + zero(eltype(A))*zero(eltype(B)))
             BB = similar(B, TAB, size(B))
@@ -1846,14 +2003,14 @@ for mat in (:AbstractVector, :AbstractMatrix)
     ### Left division with triangle to the left hence rhs cannot be transposed. Quotients.
     @eval begin
         function \(A::Union{UpperTriangular,LowerTriangular}, B::$mat)
-            @assert !has_offset_axes(B)
+            require_one_based_indexing(B)
             TAB = typeof((zero(eltype(A))*zero(eltype(B)) + zero(eltype(A))*zero(eltype(B)))/one(eltype(A)))
             BB = similar(B, TAB, size(B))
             copyto!(BB, B)
             ldiv!(convert(AbstractArray{TAB}, A), BB)
         end
         function \(adjA::Adjoint{<:Any,<:Union{UpperTriangular,LowerTriangular}}, B::$mat)
-            @assert !has_offset_axes(B)
+            require_one_based_indexing(B)
             A = adjA.parent
             TAB = typeof((zero(eltype(A))*zero(eltype(B)) + zero(eltype(A))*zero(eltype(B)))/one(eltype(A)))
             BB = similar(B, TAB, size(B))
@@ -1861,7 +2018,7 @@ for mat in (:AbstractVector, :AbstractMatrix)
             ldiv!(adjoint(convert(AbstractArray{TAB}, A)), BB)
         end
         function \(transA::Transpose{<:Any,<:Union{UpperTriangular,LowerTriangular}}, B::$mat)
-            @assert !has_offset_axes(B)
+            require_one_based_indexing(B)
             A = transA.parent
             TAB = typeof((zero(eltype(A))*zero(eltype(B)) + zero(eltype(A))*zero(eltype(B)))/one(eltype(A)))
             BB = similar(B, TAB, size(B))
@@ -1872,14 +2029,14 @@ for mat in (:AbstractVector, :AbstractMatrix)
     ### Right division with triangle to the right hence lhs cannot be transposed. No quotients.
     @eval begin
         function /(A::$mat, B::Union{UnitUpperTriangular, UnitLowerTriangular})
-            @assert !has_offset_axes(A)
+            require_one_based_indexing(A)
             TAB = typeof(zero(eltype(A))*zero(eltype(B)) + zero(eltype(A))*zero(eltype(B)))
             AA = similar(A, TAB, size(A))
             copyto!(AA, A)
             rdiv!(AA, convert(AbstractArray{TAB}, B))
         end
         function /(A::$mat, adjB::Adjoint{<:Any,<:Union{UnitUpperTriangular, UnitLowerTriangular}})
-            @assert !has_offset_axes(A)
+            require_one_based_indexing(A)
             B = adjB.parent
             TAB = typeof(zero(eltype(A))*zero(eltype(B)) + zero(eltype(A))*zero(eltype(B)))
             AA = similar(A, TAB, size(A))
@@ -1887,7 +2044,7 @@ for mat in (:AbstractVector, :AbstractMatrix)
             rdiv!(AA, adjoint(convert(AbstractArray{TAB}, B)))
         end
         function /(A::$mat, transB::Transpose{<:Any,<:Union{UnitUpperTriangular, UnitLowerTriangular}})
-            @assert !has_offset_axes(A)
+            require_one_based_indexing(A)
             B = transB.parent
             TAB = typeof(zero(eltype(A))*zero(eltype(B)) + zero(eltype(A))*zero(eltype(B)))
             AA = similar(A, TAB, size(A))
@@ -1898,14 +2055,14 @@ for mat in (:AbstractVector, :AbstractMatrix)
     ### Right division with triangle to the right hence lhs cannot be transposed. Quotients.
     @eval begin
         function /(A::$mat, B::Union{UpperTriangular,LowerTriangular})
-            @assert !has_offset_axes(A)
+            require_one_based_indexing(A)
             TAB = typeof((zero(eltype(A))*zero(eltype(B)) + zero(eltype(A))*zero(eltype(B)))/one(eltype(A)))
             AA = similar(A, TAB, size(A))
             copyto!(AA, A)
             rdiv!(AA, convert(AbstractArray{TAB}, B))
         end
         function /(A::$mat, adjB::Adjoint{<:Any,<:Union{UpperTriangular,LowerTriangular}})
-            @assert !has_offset_axes(A)
+            require_one_based_indexing(A)
             B = adjB.parent
             TAB = typeof((zero(eltype(A))*zero(eltype(B)) + zero(eltype(A))*zero(eltype(B)))/one(eltype(A)))
             AA = similar(A, TAB, size(A))
@@ -1913,7 +2070,7 @@ for mat in (:AbstractVector, :AbstractMatrix)
             rdiv!(AA, adjoint(convert(AbstractArray{TAB}, B)))
         end
         function /(A::$mat, transB::Transpose{<:Any,<:Union{UpperTriangular,LowerTriangular}})
-            @assert !has_offset_axes(A)
+            require_one_based_indexing(A)
             B = transB.parent
             TAB = typeof((zero(eltype(A))*zero(eltype(B)) + zero(eltype(A))*zero(eltype(B)))/one(eltype(A)))
             AA = similar(A, TAB, size(A))
@@ -1925,14 +2082,14 @@ end
 ### Multiplication with triangle to the right and hence lhs cannot be transposed.
 # Only for AbstractMatrix, hence outside the above loop.
 function *(A::AbstractMatrix, B::AbstractTriangular)
-    @assert !has_offset_axes(A)
+    require_one_based_indexing(A)
     TAB = typeof(zero(eltype(A))*zero(eltype(B)) + zero(eltype(A))*zero(eltype(B)))
     AA = similar(A, TAB, size(A))
     copyto!(AA, A)
     rmul!(AA, convert(AbstractArray{TAB}, B))
 end
 function *(A::AbstractMatrix, adjB::Adjoint{<:Any,<:AbstractTriangular})
-    @assert !has_offset_axes(A)
+    require_one_based_indexing(A)
     B = adjB.parent
     TAB = typeof(zero(eltype(A))*zero(eltype(B)) + zero(eltype(A))*zero(eltype(B)))
     AA = similar(A, TAB, size(A))
@@ -1940,7 +2097,7 @@ function *(A::AbstractMatrix, adjB::Adjoint{<:Any,<:AbstractTriangular})
     rmul!(AA, adjoint(convert(AbstractArray{TAB}, B)))
 end
 function *(A::AbstractMatrix, transB::Transpose{<:Any,<:AbstractTriangular})
-    @assert !has_offset_axes(A)
+    require_one_based_indexing(A)
     B = transB.parent
     TAB = typeof(zero(eltype(A))*zero(eltype(B)) + zero(eltype(A))*zero(eltype(B)))
     AA = similar(A, TAB, size(A))
@@ -2256,7 +2413,7 @@ end
 # Repeatedly compute the square roots of A so that in the end its
 # eigenvalues are close enough to the positive real line
 function invsquaring(A0::UpperTriangular, theta)
-    @assert !has_offset_axes(theta)
+    require_one_based_indexing(theta)
     # assumes theta is in ascending order
     maxsqrt = 100
     tmax = size(theta, 1)
@@ -2467,7 +2624,7 @@ eigen(A::AbstractTriangular) = Eigen(eigvals(A), eigvecs(A))
 # Generic singular systems
 for func in (:svd, :svd!, :svdvals)
     @eval begin
-        ($func)(A::AbstractTriangular) = ($func)(copyto!(similar(parent(A)), A))
+        ($func)(A::AbstractTriangular; kwargs...) = ($func)(copyto!(similar(parent(A)), A); kwargs...)
     end
 end
 

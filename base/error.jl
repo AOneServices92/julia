@@ -43,10 +43,18 @@ function error(s::Vararg{Any,N}) where {N}
 end
 
 """
-    rethrow([e])
+    rethrow()
 
-Throw an object without changing the current exception backtrace. The default argument is
-the current exception (if called within a `catch` block).
+Rethrow the current exception from within a `catch` block. The rethrown
+exception will continue propagation as if it had not been caught.
+
+!!! note
+    The alternative form `rethrow(e)` allows you to associate an alternative
+    exception object `e` with the current backtrace. However this misrepresents
+    the program state at the time of the error so you're encouraged to instead
+    throw a new exception using `throw(e)`. In Julia 1.1 and above, using
+    `throw(e)` will preserve the root cause exception on the stack, as
+    described in [`catch_stack`](@ref).
 """
 rethrow() = ccall(:jl_rethrow, Bottom, ())
 rethrow(e) = ccall(:jl_rethrow_other, Bottom, (Any,), e)
@@ -133,6 +141,21 @@ Raises a `SystemError` for `errno` with the descriptive string `sysfunc` if `ift
 """
 systemerror(p, b::Bool; extrainfo=nothing) = b ? throw(Main.Base.SystemError(string(p), Libc.errno(), extrainfo)) : nothing
 
+
+## system errors from Windows API functions
+struct WindowsErrorInfo
+    errnum::UInt32
+    extrainfo
+end
+"""
+    windowserror(sysfunc, iftrue)
+
+Like [`systemerror`](@ref), but for Windows API functions that use [`GetLastError`](@ref) instead
+of setting [`errno`](@ref).
+"""
+windowserror(p, b::Bool; extrainfo=nothing) = b ? throw(Main.Base.SystemError(string(p), Libc.errno(), WindowsErrorInfo(Libc.GetLastError(), extrainfo))) : nothing
+
+
 ## assertion macro ##
 
 
@@ -168,7 +191,11 @@ macro assert(ex, msgs...)
         msg = Main.Base.string(msg)
     else
         # string() might not be defined during bootstrap
-        msg = :(Main.Base.string($(Expr(:quote,msg))))
+        msg = quote
+            msg = $(Expr(:quote,msg))
+            isdefined(Main, :Base) ? Main.Base.string(msg) :
+                (Core.println(msg); "Error during bootstrap. See stdout.")
+        end
     end
     return :($(esc(ex)) ? $(nothing) : throw(AssertionError($msg)))
 end
@@ -206,12 +233,15 @@ length(ebo::ExponentialBackOff) = ebo.n
 eltype(::Type{ExponentialBackOff}) = Float64
 
 """
-    retry(f::Function;  delays=ExponentialBackOff(), check=nothing) -> Function
+    retry(f;  delays=ExponentialBackOff(), check=nothing) -> Function
 
 Return an anonymous function that calls function `f`.  If an exception arises,
 `f` is repeatedly called again, each time `check` returns `true`, after waiting the
 number of seconds specified in `delays`.  `check` should input `delays`'s
 current state and the `Exception`.
+
+!!! compat "Julia 1.2"
+    Before Julia 1.2 this signature was restricted to `f::Function`.
 
 # Examples
 ```julia
@@ -222,7 +252,7 @@ retry(http_get, check=(s,e)->e.status == "503")(url)
 retry(read, check=(s,e)->isa(e, IOError))(io, 128; all=false)
 ```
 """
-function retry(f::Function;  delays=ExponentialBackOff(), check=nothing)
+function retry(f;  delays=ExponentialBackOff(), check=nothing)
     (args...; kwargs...) -> begin
         y = iterate(delays)
         while y !== nothing

@@ -35,8 +35,7 @@ struct GC_Diff
 end
 
 gc_total_bytes(gc_num::GC_Num) =
-    (gc_num.allocd + gc_num.deferred_alloc +
-     Int64(gc_num.collect) + Int64(gc_num.total_allocd))
+    (gc_num.allocd + gc_num.deferred_alloc + Int64(gc_num.total_allocd))
 
 function GC_Diff(new::GC_Num, old::GC_Num)
     # logic from `src/gc.c:jl_gc_total_bytes`
@@ -77,39 +76,43 @@ function prettyprint_getunits(value, numunits, factor)
     return number, unit
 end
 
-function padded_nonzero_print(value,str)
+function padded_nonzero_print(value, str)
     if value != 0
-        blanks = "                "[1:18-length(str)]
-        println("$str:$blanks$value")
+        blanks = "                "[1:(18 - length(str))]
+        println(str, ":", blanks, value)
     end
 end
 
-function format_bytes(bytes)
+
+function format_bytes(bytes) # also used by InteractiveUtils
     bytes, mb = prettyprint_getunits(bytes, length(_mem_units), Int64(1024))
     if mb == 1
-        Printf.@sprintf("%d %s%s", bytes, _mem_units[mb], bytes==1 ? "" : "s")
+        return string(Int(bytes), " ", _mem_units[mb], bytes==1 ? "" : "s")
     else
-        Printf.@sprintf("%.3f %s", bytes, _mem_units[mb])
+        return string(Ryu.writefixed(Float64(bytes), 3), " ", _mem_units[mb])
     end
 end
 
 function time_print(elapsedtime, bytes=0, gctime=0, allocs=0)
-    Printf.@printf("%10.6f seconds", elapsedtime/1e9)
+    timestr = Ryu.writefixed(Float64(elapsedtime/1e9), 6)
+    length(timestr) < 10 && print(" "^(10 - length(timestr)))
+    print(timestr, " seconds")
     if bytes != 0 || allocs != 0
         allocs, ma = prettyprint_getunits(allocs, length(_cnt_units), Int64(1000))
         if ma == 1
-            Printf.@printf(" (%d%s allocation%s: ", allocs, _cnt_units[ma], allocs==1 ? "" : "s")
+            print(" (", Int(allocs), _cnt_units[ma], allocs==1 ? " allocation: " : " allocations: ")
         else
-            Printf.@printf(" (%.2f%s allocations: ", allocs, _cnt_units[ma])
+            print(" (", Ryu.writefixed(Float64(allocs), 2), _cnt_units[ma], " allocations: ")
         end
         print(format_bytes(bytes))
-        if gctime > 0
-            Printf.@printf(", %.2f%% gc time", 100*gctime/elapsedtime)
-        end
-        print(")")
-    elseif gctime > 0
-        Printf.@printf(", %.2f%% gc time", 100*gctime/elapsedtime)
     end
+    if gctime > 0
+        print(", ", Ryu.writefixed(Float64(100*gctime/elapsedtime), 2), "% gc time")
+    end
+    if bytes != 0 || allocs != 0
+        print(")")
+    end
+    nothing
 end
 
 function timev_print(elapsedtime, diff::GC_Diff)
@@ -136,6 +139,11 @@ returning the value of the expression.
 
 See also [`@timev`](@ref), [`@timed`](@ref), [`@elapsed`](@ref), and
 [`@allocated`](@ref).
+
+!!! note
+    For more serious benchmarking, consider the `@btime` macro from the BenchmarkTools.jl
+    package which among other things evaluates the function multiple times in order to
+    reduce noise.
 
 ```julia-repl
 julia> @time rand(10^6);
@@ -614,11 +622,8 @@ if Sys.iswindows()
 
         #      2.3: If that failed for any reason other than the user canceling, error out.
         #           If the user canceled, just return nothing
-        if code == ERROR_CANCELLED
-            return nothing
-        elseif code != ERROR_SUCCESS
-            error(Base.Libc.FormatMessage(code))
-        end
+        code == ERROR_CANCELLED && return nothing
+        windowserror(:winprompt, code != ERROR_SUCCESS)
 
         # Step 3: Convert encrypted credentials back to plain text
         passbuf = Vector{UInt16}(undef, 1024)
@@ -630,9 +635,7 @@ if Sys.iswindows()
         succeeded = ccall((:CredUnPackAuthenticationBufferW, "credui.dll"), Bool,
             (UInt32, Ptr{Cvoid}, UInt32, Ptr{UInt16}, Ptr{UInt32}, Ptr{UInt16}, Ptr{UInt32}, Ptr{UInt16}, Ptr{UInt32}),
             0, outbuf_data[], outbuf_size[], usernamebuf, usernamelen, dummybuf, Ref{UInt32}(1024), passbuf, passlen)
-        if !succeeded
-            error(Base.Libc.FormatMessage())
-        end
+        windowserror(:winprompt, !succeeded)
 
         # Step 4: Free the encrypted buffer
         # ccall(:SecureZeroMemory, Ptr{Cvoid}, (Ptr{Cvoid}, Csize_t), outbuf_data[], outbuf_size[]) - not an actual function
@@ -659,7 +662,7 @@ _crc32c(a::Union{Array{UInt8},FastContiguousSubArray{UInt8,N,<:Array{UInt8}} whe
 _crc32c(s::String, crc::UInt32=0x00000000) = unsafe_crc32c(s, sizeof(s) % Csize_t, crc)
 
 function _crc32c(io::IO, nb::Integer, crc::UInt32=0x00000000)
-    nb < 0 && throw(ArgumentError("number of bytes to checksum must be ≥ 0"))
+    nb < 0 && throw(ArgumentError("number of bytes to checksum must be ≥ 0, got $nb"))
     # use block size 24576=8192*3, since that is the threshold for
     # 3-way parallel SIMD code in the underlying jl_crc32c C function.
     buf = Vector{UInt8}(undef, min(nb, 24576))
@@ -812,7 +815,7 @@ function runtests(tests = ["all"]; ncores = ceil(Int, Sys.CPU_THREADS / 2),
         tests = split(tests)
     end
     exit_on_error && push!(tests, "--exit-on-error")
-    seed != nothing && push!(tests, "--seed=0x$(string(seed % UInt128, base=16))") # cast to UInt128 to avoid a minus sign
+    seed !== nothing && push!(tests, "--seed=0x$(string(seed % UInt128, base=16))") # cast to UInt128 to avoid a minus sign
     ENV2 = copy(ENV)
     ENV2["JULIA_CPU_THREADS"] = "$ncores"
     try
