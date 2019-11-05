@@ -555,7 +555,7 @@ Base.@propagate_inbounds _newindex(ax::Tuple{}, I::Tuple{}) = ()
 @inline function _newindexer(indsA::Tuple)
     ind1 = indsA[1]
     keep, Idefault = _newindexer(tail(indsA))
-    (Base.length(ind1)!=1, keep...), (first(ind1), Idefault...)
+    (Base.length(ind1)::Integer != 1, keep...), (first(ind1), Idefault...)
 end
 
 @inline function Base.getindex(bc::Broadcasted, I::Union{Integer,CartesianIndex})
@@ -916,22 +916,22 @@ end
 @inline function copyto!(dest::BitArray, bc::Broadcasted{Nothing})
     axes(dest) == axes(bc) || throwdm(axes(dest), axes(bc))
     ischunkedbroadcast(dest, bc) && return chunkedcopyto!(dest, bc)
+    length(dest) < 256 && return invoke(copyto!, Tuple{AbstractArray, Broadcasted{Nothing}}, dest, bc)
     tmp = Vector{Bool}(undef, bitcache_size)
     destc = dest.chunks
-    ind = cind = 1
+    cind = 1
     bc′ = preprocess(dest, bc)
-    @simd for I in eachindex(bc′)
-        @inbounds tmp[ind] = bc′[I]
-        ind += 1
-        if ind > bitcache_size
-            dumpbitcache(destc, cind, tmp)
-            cind += bitcache_chunks
-            ind = 1
+    for P in Iterators.partition(eachindex(bc′), bitcache_size)
+        ind = 1
+        @simd for I in P
+            @inbounds tmp[ind] = bc′[I]
+            ind += 1
         end
-    end
-    if ind > 1
-        @inbounds tmp[ind:bitcache_size] .= false
+        @simd for i in ind:bitcache_size
+            @inbounds tmp[i] = false
+        end
         dumpbitcache(destc, cind, tmp)
+        cind += bitcache_chunks
     end
     return dest
 end

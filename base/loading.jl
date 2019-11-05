@@ -265,7 +265,7 @@ end
 """
     pathof(m::Module)
 
-Return the path of `m.jl` file that was used to `import` module `m`,
+Return the path of the `m.jl` file that was used to `import` module `m`,
 or `nothing` if `m` was not imported from a package.
 
 Use [`dirname`](@ref) to get the directory part and [`basename`](@ref)
@@ -275,6 +275,19 @@ function pathof(m::Module)
     pkgid = get(Base.module_keys, m, nothing)
     pkgid === nothing && return nothing
     return Base.locate_package(pkgid)
+end
+
+"""
+    pkgdir(m::Module)
+
+ Return the root directory of the package that imported module `m`,
+ or `nothing` if `m` was not imported from a package.
+ """
+function pkgdir(m::Module)
+    rootmodule = Base.moduleroot(m)
+    path = pathof(rootmodule)
+    path === nothing && return nothing
+    return dirname(dirname(path))
 end
 
 ## generic project & manifest API ##
@@ -464,21 +477,6 @@ function entry_path(path::String, name::String)::Union{Nothing,String}
     path = normpath(joinpath(path, "src", "$name.jl"))
     isfile_casesensitive(path) && return path
     return nothing # source not found
-end
-
-# given a project path (project directory or entry point)
-# return the project file
-function package_path_to_project_file(path::String)::Union{Nothing,String}
-    if !isdir(path)
-        dir = dirname(path)
-        basename(dir) == "src" || return nothing
-        path = dirname(dir)
-    end
-    for proj in project_names
-        project_file = joinpath(path, proj)
-        isfile_casesensitive(project_file) && return project_file
-    end
-    return nothing
 end
 
 ## explicit project & manifest API ##
@@ -1206,7 +1204,10 @@ function compilecache_path(pkg::PkgId)::String
     if pkg.uuid === nothing
         abspath(cachepath, entryfile) * ".ji"
     else
-        project_precompile_slug = slug(_crc32c(something(Base.active_project(), "")), 5)
+        crc = _crc32c(something(Base.active_project(), ""))
+        crc = _crc32c(unsafe_string(JLOptions().image_file), crc)
+        crc = _crc32c(unsafe_string(JLOptions().julia_bin), crc)
+        project_precompile_slug = slug(crc, 5)
         abspath(cachepath, string(entryfile, "_", project_precompile_slug, ".ji"))
     end
 end
